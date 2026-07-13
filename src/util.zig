@@ -36,7 +36,7 @@ pub fn get_session_entries(
     defer dir.close();
     var iter = dir.iterate();
 
-    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 30);
+    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, socket.initial_session_capacity);
 
     while (try iter.next()) |entry| {
         const exists = socket.sessionExists(dir, entry.name) catch continue;
@@ -148,12 +148,12 @@ const DA2_RESPONSE = "\x1b[>1;10;0c";
 
 pub fn respondToDeviceAttributes(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), data: []const u8) void {
     // Scan for DA queries in PTY output and respond on behalf of the terminal.
-    // This handles the case where no client is attached (e.g. zmx run)
+    // This handles the case where no client is attached (e.g. nmux run)
     // and the shell (e.g. fish) sends a DA query that would otherwise go unanswered.
     //
     // Responses are queued into the daemon's pty_write_buf (not written
     // directly) so they don't interleave with any already-buffered input —
-    // e.g. a large `zmx run` payload still draining after the client
+    // e.g. a large `nmux run` payload still draining after the client
     // disconnected.
     //
     // DA1 query: ESC [ c  or  ESC [ 0 c
@@ -189,13 +189,13 @@ const OSC_133_A = "\x1b]133;A";
 
 /// Rewrite OSC 133;A sequences to include `redraw=0`, which tells the outer
 /// terminal not to clear prompt lines on resize. This is necessary because
-/// zmx sits between the shell and the outer terminal: from the outer terminal's
-/// perspective, the foreground process (zmx client) cannot redraw prompts.
+/// nmux sits between the shell and the outer terminal: from the outer terminal's
+/// perspective, the foreground process (nmux client) cannot redraw prompts.
 /// Without this, the outer terminal clears the prompt on resize expecting the
-/// shell to redraw it, but the shell's redraw goes through zmx's IPC path with
+/// shell to redraw it, but the shell's redraw goes through nmux's IPC path with
 /// cursor coordinates relative to the inner PTY, causing a cursor desync that
 /// makes the prompt invisible.
-/// See: https://github.com/neurosnap/zmx/issues/111
+/// See: https://github.com/neurosnap/nmux/issues/111
 pub fn rewritePromptRedraw(alloc: std.mem.Allocator, data: []const u8) ?[]const u8 {
     // Fast-path: most PTY output has no escape sequences at all. A scalar
     // byte scan for ESC is cheaper than the full string indexOf below.
@@ -326,7 +326,7 @@ test "rewritePromptRedraw: embedded in larger output" {
 }
 
 pub fn findTaskExitMarker(output: []const u8) ?u8 {
-    const marker = "ZMX_TASK_COMPLETED:";
+    const marker = "NMUX_TASK_COMPLETED:";
 
     // Search for marker in output
     if (std.mem.indexOf(u8, output, marker)) |idx| {
@@ -387,10 +387,14 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
     return result.toOwnedSlice(alloc);
 }
 
+const ctrl_backslash_key = 0x5c;
+const ctrl_modifier_bits = 0b100;
+const intentional_modifier_mask = 0b00111111;
+
 /// Detects Kitty keyboard protocol escape sequence for Ctrl+\
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
-    return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
+    return buf[0] == 0x1C or isKeyPressed(buf, ctrl_backslash_key, ctrl_modifier_bits);
 }
 
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
@@ -441,8 +445,8 @@ fn keypressWithMod(buf: []const u8, expected_key: u32, expected_mods: u32) bool 
     // 5. Only accept intentional modifiers. Lock modifiers
     //    (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
     //    they are ambient state, not deliberate key combinations.
-    const intentional_mods = mod_raw & 0b00111111;
-    if (expected_mods > 0 and expected_mods != intentional_mods) return false;
+    const mods = mod_raw & intentional_modifier_mask;
+    if (expected_mods > 0 and expected_mods != mods) return false;
 
     // 6. Parse optional event type after ':'.
     if (pos < buf.len and buf[pos] == ':') {
@@ -533,7 +537,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     const has_scrollback = !screen_top.eql(active_top);
 
     // Two-phase serialization to preserve scrollback without corrupting
-    // cursor positions. This matters for nested zmx sessions (zmx→SSH→zmx)
+    // cursor positions. This matters for nested nmux sessions (nmux→SSH→nmux)
     // where the outer daemon's ghostty-vt accumulates inner session scrollback.
     //
     // Phase 1: Emit scrollback content (plain text with styles, no terminal extras).
@@ -542,7 +546,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     // The clear ensures visible content starts from a clean slate regardless of
     // how much scrollback preceded it. CUP cursor positioning is then correct.
     //
-    // See: https://github.com/neurosnap/zmx/issues/31
+    // See: https://github.com/neurosnap/nmux/issues/31
 
     // Phase 1: scrollback only (if any exists)
     if (has_scrollback) {
@@ -1172,8 +1176,8 @@ test "serializeTerminalState with scrollback preserves visible content" {
 }
 
 test "serializeTerminalState nested roundtrip preserves content" {
-    // Simulates: inner zmx → serialized state → outer ghostty-vt → serialized again → client
-    // This is the exact nested session scenario (zmx → SSH → zmx).
+    // Simulates: inner nmux → serialized state → outer ghostty-vt → serialized again → client
+    // This is the exact nested session scenario (nmux → SSH → nmux).
     const alloc = testing.allocator;
 
     // "Inner" terminal with scrollback + markers

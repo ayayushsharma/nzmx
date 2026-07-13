@@ -1,12 +1,15 @@
 const std = @import("std");
 const posix = std.posix;
 
+pub const listen_backlog = 128;
+pub const initial_session_capacity = 30;
+
 pub fn getSeshPrefix() []const u8 {
-    return std.posix.getenv("ZMX_SESSION_PREFIX") orelse "";
+    return std.posix.getenv("NMUX_SESSION_PREFIX") orelse "";
 }
 
 pub fn getSeshNameFromEnv() []const u8 {
-    return std.posix.getenv("ZMX_SESSION") orelse "";
+    return std.posix.getenv("NMUX_SESSION") orelse "";
 }
 
 pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
@@ -67,7 +70,7 @@ pub fn createSocket(fname: []const u8) !i32 {
 
     var unix_addr = try std.net.Address.initUnix(fname);
     try posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
-    try posix.listen(fd, 128);
+    try posix.listen(fd, listen_backlog);
     return fd;
 }
 
@@ -94,21 +97,28 @@ pub fn getSocketPath(
 }
 
 pub fn printSessionNameTooLong(session_name: []const u8, socket_dir: []const u8) void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
     if (maxSessionNameLen(socket_dir)) |max_len| {
-        w.interface.print(
-            "error: session name is too long ({d} bytes, max {d} for socket directory \"{s}\")\n",
-            .{ session_name.len, max_len, socket_dir },
-        ) catch {};
+        std.log.err("error: session name is too long ({d} bytes, max {d} for socket directory \"{s}\")", .{ session_name.len, max_len, socket_dir });
     } else {
-        w.interface.print(
-            "error: socket directory path is too long (\"{s}\")\n",
-            .{socket_dir},
-        ) catch {};
+        std.log.err("error: socket directory path is too long (\"{s}\")", .{socket_dir});
     }
-    w.interface.flush() catch {};
 }
+
+pub fn getSocketPathChecked(
+    alloc: std.mem.Allocator,
+    socket_dir: []const u8,
+    name: []const u8,
+) error{ NameTooLong, OutOfMemory }![]const u8 {
+    return getSocketPath(alloc, socket_dir, name) catch |err| switch (err) {
+        error.NameTooLong => {
+            printSessionNameTooLong(name, socket_dir);
+            return error.NameTooLong;
+        },
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+}
+
+
 
 /// Returns the maximum session name length for a given socket directory,
 /// or null if the socket directory itself is already too long.
@@ -129,9 +139,9 @@ test "max_socket_path_len matches platform sockaddr_un" {
 
 test "getSocketPath succeeds for paths within limit" {
     const alloc = std.testing.allocator;
-    const result = try getSocketPath(alloc, "/tmp/zmx", "mysession");
+    const result = try getSocketPath(alloc, "/tmp/nmux", "mysession");
     defer alloc.free(result);
-    try std.testing.expectEqualStrings("/tmp/zmx/mysession", result);
+    try std.testing.expectEqualStrings("/tmp/nmux/mysession", result);
 }
 
 test "getSocketPath returns NameTooLong when path exceeds limit" {
@@ -156,7 +166,7 @@ test "getSocketPath returns NameTooLong for empty dir with oversized name" {
 }
 
 test "maxSessionNameLen computes correct dynamic limit" {
-    const short_dir = "/tmp/zmx";
+    const short_dir = "/tmp/nmux";
     const short_max = maxSessionNameLen(short_dir).?;
     try std.testing.expectEqual(max_socket_path_len - short_dir.len - 1, short_max);
 
@@ -171,7 +181,7 @@ test "maxSessionNameLen computes correct dynamic limit" {
 
 test "getSocketPath boundary: name fills exactly to limit" {
     const alloc = std.testing.allocator;
-    const dir = "/tmp/zmx";
+    const dir = "/tmp/nmux";
     const max_name_len = maxSessionNameLen(dir).?;
 
     const name_at_limit = try alloc.alloc(u8, max_name_len);
